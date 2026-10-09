@@ -282,3 +282,39 @@ def test_unreadable_message_does_not_starve_older_mail_or_claim_complete_capture
     finally:
         if proc: proc.stop()
         server.stop()
+
+
+def test_retained_only_mail_supports_delete_undo(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        uid = server.append('INBOX', message(41137), flags=())
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path, binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: list((proc.config_dir / 'mailbridge' / 'records').glob('*.json')), 60, what='capture')
+        record = command(proc, 'list')['records'][0]
+        server.expunge('INBOX', [uid]); proc.wake(); proc.wait_quiescent(timeout=60)
+        trash = proc.db_folders()['Trash']
+        task_id = proc.queue_task({'__cls': 'ChangeFolderTask', 'messageIds': [record['messageId']], 'folder': {'id': trash['id'], 'path': 'Trash', 'role': 'trash'}})
+        def task_data():
+            with proc.db() as db:
+                row = db.execute('SELECT data FROM Task WHERE id = ?', (task_id,)).fetchone()
+                return json.loads(row['data']) if row else {}
+        proc.wait_for(lambda: task_data().get('undoPlacements'), 30, what='retained undo history')
+        history = task_data()['undoPlacements']
+        assert len(history[record['messageId']]) == 1
+        retained_id = history[record['messageId']][0]['folderId']
+        with proc.db() as db:
+            folder = json.loads(db.execute('SELECT data FROM Folder WHERE id = ?', (retained_id,)).fetchone()['data'])
+        proc.queue_task({'__cls': 'ChangeFolderTask', 'messageIds': [record['messageId']], 'folder': folder,
+                         'sourceFolderIds': [trash['id']], 'restorePlacements': history, 'isUndo': True})
+        def restored():
+            with proc.db() as db:
+                row = db.execute('SELECT data FROM Message WHERE id = ?', (record['messageId'],)).fetchone()
+                return row and json.loads(row['data']).get('mailbridgeHidden') is False
+        proc.wait_for(restored, 30, what='local undo')
+        assert command(proc, 'list')['records'][0]['folder'] == 'INBOX'
+        assert not server.store.get('INBOX').messages, 'undo of local mail must not upload it to the company mailbox'
+    finally:
+        if proc: proc.stop()
+        server.stop()

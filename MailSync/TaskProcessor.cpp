@@ -583,8 +583,18 @@ static vector<PlacementMove> _movesForMessage(MailStore * store, Message * msg, 
 // where and how its undo sends a copy back (_restoreMovesForMessage).
 void _applyFolder(MailStore * store, Message * msg, const vector<Placement> & placements, json & data) {
     json shownIn = json::array();
+    json retainedRestore;
+    if (MailProcessor::retainedArchiveEnabled()) {
+        for (auto & p : placements) {
+            auto folder = p.remoteUID == 0 ? store->folderById(msg->accountId(), p.folderId) : nullptr;
+            if (folder && folder->_data.value("mailbridgeLocal", false)) {
+                retainedRestore = {{"folderId", p.folderId}, {"bits", p.flagBits()}};
+                break;
+            }
+        }
+    }
     if (MailProcessor::retainedArchiveEnabled() && msg->_data.contains("mailbridgeKey")) {
-        string role = data["folder"].value("role", "");
+        string role = data["folder"].value("mailbridgeRole", data["folder"].value("role", ""));
         json accountJSON = {{"id", msg->accountId()}, {"emailAddress", "local"}};
         auto account = make_shared<Account>(accountJSON);
         string origin = data["folder"].value("mailbridgeSource", data["folder"].value("path", ""));
@@ -598,6 +608,7 @@ void _applyFolder(MailStore * store, Message * msg, const vector<Placement> & pl
         }
         store->beginPlacementMove(*msg, move.placement.folderId, move.placement.remoteUID, move.destFolderId);
     }
+    if (shownIn.empty() && !retainedRestore.is_null()) shownIn.push_back(retainedRestore);
     if (!shownIn.empty()) {
         data["undoPlacements"][msg->id()] = shownIn;
     }
