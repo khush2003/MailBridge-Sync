@@ -745,10 +745,6 @@ void runListenOnMainThread(shared_ptr<Account> account) {
     time_t lostCINAt = 0;
 
     processor.cleanupTasksAfterLaunch();
-    if (MailProcessor::retainedArchiveEnabled()) {
-        try { MailProcessor{account, &store}.retainedArchiveCommand({{"operation", "list"}}); }
-        catch (const std::exception & ex) { spdlog::get("logger")->error("Retained archive recovery: {}", ex.what()); }
-    }
     
     while(true) {
         AutoreleasePool pool;
@@ -1066,6 +1062,17 @@ string exectuablePath = argv[0];
     if (mode == "sync") {
         spdlog::get("logger")->info("------------- Starting Sync ({}) ---------------", account->emailAddress());
 
+        // Recover durable placements and state before any server scan can recapture a
+        // message and overwrite its snapshot (especially locally hidden Trash mail).
+        if (MailProcessor::retainedArchiveEnabled()) {
+            MailStore store;
+            store.setStreamDelay(5);
+            try { MailProcessor{account, &store}.retainedArchiveCommand({{"operation", "list"}}); }
+            catch (const std::exception & ex) {
+                spdlog::get("logger")->error("Retained archive recovery: {}", ex.what());
+                return 1;
+            }
+        }
         fgThread = nullptr; // started after background iteration
         bgThread = new std::thread([&]() {
             SetThreadName("background");
