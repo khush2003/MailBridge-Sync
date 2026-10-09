@@ -63,6 +63,7 @@ public:
     void moveRetainedPlacement(Message & message, const string & origin, const string & role = "");
     void hideRetainedPlacement(Message & message, const string & origin, const string & role);
     static void writeRetainedState(Message & message);
+    static void stageRetainedMessage(Data * raw);
     void retainMessage(Message * message, Data * raw, Folder & source);
     shared_ptr<Message> importRetainedMessage(Data * raw, const json & descriptor);
     json retainedArchiveCommand(const json & packet);

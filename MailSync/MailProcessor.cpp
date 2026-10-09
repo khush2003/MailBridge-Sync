@@ -929,7 +929,19 @@ namespace {
 std::mutex retainedArchiveMutex;
 std::atomic<bool> retainedMailboxReady{false};
 std::filesystem::path retainedRoot() {
-    return std::filesystem::u8path(MailUtils::getEnvUTF8("CONFIG_DIR_PATH")) / "mailbridge";
+    auto root = std::filesystem::absolute(std::filesystem::u8path(MailUtils::getEnvUTF8("CONFIG_DIR_PATH")) / "mailbridge");
+#if defined(_MSC_VER)
+    root.make_preferred();
+    auto native = root.wstring();
+    const std::wstring extended = L"\\\\?\\";
+    if (native.rfind(extended, 0) != 0) {
+        if (native.rfind(L"\\\\", 0) == 0) native = extended + L"UNC\\" + native.substr(2);
+        else native = extended + native;
+    }
+    return std::filesystem::path(native);
+#else
+    return root;
+#endif
 }
 string readRetained(const std::filesystem::path & path) {
     std::ifstream in(path, std::ios::binary);
@@ -1073,6 +1085,13 @@ shared_ptr<Message> MailProcessor::importRetainedMessage(Data * raw, const json 
     return fresh;
 }
 
+void MailProcessor::stageRetainedMessage(Data * raw) {
+    if (!retainedArchiveEnabled()) return;
+    string bytes(raw->bytes(), raw->length());
+    std::lock_guard<std::mutex> lock(retainedArchiveMutex);
+    durableRetainedWrite(retainedRoot() / "blobs" / (MailUtils::sha256Hex(bytes) + ".eml"), bytes);
+}
+
 void MailProcessor::setRetainedMailboxReady(bool ready) { retainedMailboxReady.store(ready); }
 
 json MailProcessor::retainedArchiveCommand(const json & packet) {
@@ -1196,6 +1215,10 @@ void MailProcessor::moveRetainedPlacement(Message & message, const string & orig
         folder->_data["mailbridgeSource"] = origin;
         folder->_data["mailbridgeRole"] = actualRole;
         folder->localStatus() = {{LS_BUSY, false}, {LS_SYNCED_MIN_UID, 1}};
+        store->save(folder.get());
+    }
+    if (folder->_data.value("mailbridgeRole", "") != actualRole && !actualRole.empty()) {
+        folder->_data["mailbridgeRole"] = actualRole;
         store->save(folder.get());
     }
     auto placements = store->placementsForMessage(message.id());

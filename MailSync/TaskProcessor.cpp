@@ -2241,6 +2241,7 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
 
     // Save the message data / body we'll write to the sent folder
     Data * messageDataForSent = builder.data();
+    MailProcessor::stageRetainedMessage(messageDataForSent);
 
     /*
     OK! If we've reached this point we're going to deliver the message. To do multisend,
@@ -2305,7 +2306,7 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
         string digest = MailUtils::sha256Hex(raw);
         string key = MailUtils::retainedMessageKey(email, messageDataForSent);
         MailProcessor{account, store}.importRetainedMessage(messageDataForSent,
-            {{"schema", 1}, {"key", key}, {"digest", digest}, {"email", email}, {"folder", sent->path()}, {"size", raw.size()}});
+            {{"schema", 1}, {"key", key}, {"digest", digest}, {"email", email}, {"folder", sent->path()}, {"role", "sent"}, {"size", raw.size()}});
     }
     _removeMessageCopiesResilient(session, store, account->id(), draft);
 
