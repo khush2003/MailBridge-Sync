@@ -2305,8 +2305,13 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
         IMAPMessage identity; identity.setHeader(parsed->header()); identity.setUid(0);
         string digest = MailUtils::sha256Hex(raw);
         string key = MailUtils::retainedMessageKey(email, messageDataForSent);
-        MailProcessor{account, store}.importRetainedMessage(messageDataForSent,
+        MailProcessor retainedProcessor{account, store};
+        auto retained = retainedProcessor.importRetainedMessage(messageDataForSent,
             {{"schema", 1}, {"key", key}, {"digest", digest}, {"email", email}, {"folder", sent->path()}, {"role", "sent"}, {"size", raw.size()}});
+        MailStoreTransaction retainedTransaction{store, "retainSentPlacement"};
+        retainedProcessor.moveRetainedPlacement(*retained, sent->path(), "sent");
+        store->save(retained.get());
+        retainedTransaction.commit();
     }
     _removeMessageCopiesResilient(session, store, account->id(), draft);
 
