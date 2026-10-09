@@ -213,3 +213,44 @@ def test_pst_export_imports_complete_eml_without_uploading_it_to_imap(tmp_path):
     finally:
         if proc: proc.stop()
         server.stop()
+
+
+def test_encrypted_sync_runs_end_to_end_between_two_real_engines(tmp_path):
+    import subprocess
+    import threading
+    import pytest
+    script = Path(__file__).resolve().parents[2] / 'test' / 'mailbridge' / 'native-sync-integration.cjs'
+    if not script.exists(): pytest.skip('Full-client integration runner is not present in the standalone engine checkout')
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    server = FakeServer().start()
+    processes = {}
+    httpd = None
+    try:
+        uid = server.append('INBOX', message(41006, attachment=('sync.bin', b'full native sync payload')), flags=())
+        a = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path / 'a', binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        processes['a'] = a; a.start()
+        a.wait_for(lambda: list((a.config_dir / 'mailbridge' / 'records').glob('*.json')), 60, what='permanent capture')
+        server.expunge('INBOX', [uid]); a.wake(); a.wait_quiescent(timeout=60)
+        b = MailsyncProcess(account_json(**server.account_kwargs(), account_id='c0ffee-integration-peer'), tmp_path / 'b', binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        processes['b'] = b; b.start(); b.wait_quiescent(timeout=60)
+        class Adapter(BaseHTTPRequestHandler):
+            def do_POST(self):
+                try:
+                    packet = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    operation = packet.pop('operation')
+                    result = command(processes[self.path.lstrip('/')], operation, **packet)
+                    self.send_response(200)
+                except Exception as exc:
+                    result = {'error': str(exc)}; self.send_response(500)
+                self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(json.dumps(result).encode())
+            def log_message(self, *_): pass
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), Adapter)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        script = Path(__file__).resolve().parents[2] / 'test' / 'mailbridge' / 'native-sync-integration.cjs'
+        subprocess.run(['node', str(script), f'http://127.0.0.1:{httpd.server_port}', str(a.config_dir / 'mailbridge'), str(b.config_dir / 'mailbridge')], check=True, timeout=120)
+        assert any(p.read_bytes() == b'full native sync payload' for p in (b.config_dir / 'files').rglob('*') if p.is_file())
+    finally:
+        if httpd: httpd.shutdown(); httpd.server_close()
+        for proc in processes.values(): proc.stop()
+        server.stop()
