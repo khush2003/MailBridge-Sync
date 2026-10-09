@@ -58,6 +58,12 @@ public:
     shared_ptr<Message> updateMessage(const string & messageId, IMAPMessage * remote, Folder & folder, time_t syncDataTimestamp);
     void retrievedMessageBody(Message * message, MessageParser * parser);
     bool retrievedFileData(File * file, Data * data);
+    static bool retainedArchiveEnabled();
+    void moveRetainedPlacement(Message & message, const string & origin, const string & role = "");
+    static void writeRetainedState(Message & message);
+    void retainMessage(Message * message, Data * raw, Folder & source);
+    shared_ptr<Message> importRetainedMessage(Data * raw, const json & descriptor);
+    json retainedArchiveCommand(const json & packet);
 
     // Placement bookkeeping for copies the server no longer reports.
     void deleteVanishedPlacements(Folder & folder, const vector<uint32_t> & uids);

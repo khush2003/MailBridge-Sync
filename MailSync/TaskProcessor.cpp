@@ -536,6 +536,7 @@ static vector<PlacementMove> _movesForMessage(MailStore * store, Message * msg, 
     }
 
     vector<PlacementMove> moves;
+    if (data["folder"].value("mailbridgeLocal", false)) return moves;
     string dest = data["folder"]["id"].get<string>();
     string destRole = data["folder"].count("role") && data["folder"]["role"].is_string() ? data["folder"]["role"].get<string>() : "";
     bool everyCopy = destRole == "trash" || destRole == "spam";
@@ -582,6 +583,16 @@ static vector<PlacementMove> _movesForMessage(MailStore * store, Message * msg, 
 // where and how its undo sends a copy back (_restoreMovesForMessage).
 void _applyFolder(MailStore * store, Message * msg, const vector<Placement> & placements, json & data) {
     json shownIn = json::array();
+    if (MailProcessor::retainedArchiveEnabled() && msg->_data.contains("mailbridgeKey")) {
+        string role = data["folder"].value("role", "");
+        if (role != "trash" && role != "spam") {
+            // Accounts are supplied by the owning task processor; reconstruct the minimum archive identity here.
+            json accountJSON = {{"id", msg->accountId()}, {"emailAddress", "local"}};
+            auto account = make_shared<Account>(accountJSON);
+            string origin = data["folder"].value("mailbridgeSource", data["folder"].value("path", ""));
+            MailProcessor{account, store}.moveRetainedPlacement(*msg, origin, role);
+        }
+    }
     for (auto & move : _movesForMessage(store, msg, placements, data)) {
         if (move.placement.reportedFolderId() != move.destFolderId) {
             shownIn.push_back({{"folderId", move.placement.reportedFolderId()}, {"bits", move.placement.flagBits()}});
@@ -2275,6 +2286,17 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
      Sending complete! First, delete the draft from the server so the user knows it has been sent
      and we don't re-sync it to the app after we delete it below.
      */
+    if (MailProcessor::retainedArchiveEnabled()) {
+        string raw(messageDataForSent->bytes(), messageDataForSent->length());
+        string email = account->emailAddress();
+        std::transform(email.begin(), email.end(), email.begin(), [](unsigned char c) { return std::tolower(c); });
+        MessageParser * parsed = MessageParser::messageParserWithData(messageDataForSent);
+        IMAPMessage identity; identity.setHeader(parsed->header()); identity.setUid(0);
+        string digest = MailUtils::sha256Hex(raw);
+        string key = MailUtils::retainedMessageKey(email, messageDataForSent);
+        MailProcessor{account, store}.importRetainedMessage(messageDataForSent,
+            {{"schema", 1}, {"key", key}, {"digest", digest}, {"email", email}, {"folder", sent->path()}, {"size", raw.size()}});
+    }
     _removeMessageCopiesResilient(session, store, account->id(), draft);
 
      /* Next, scan the sent folder for the message(s) we just sent through the SMTP

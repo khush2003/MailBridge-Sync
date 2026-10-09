@@ -326,6 +326,7 @@ void SyncWorker::markAllFoldersBusy() {
         MailStoreTransaction transaction(store, "markAllFoldersBusy");
         auto allLocalFolders = store->findAll<Folder>(Query().equal("accountId", account->id()));
         for (auto f : allLocalFolders) {
+            if (f->_data.value("mailbridgeLocal", false)) continue;
             f->localStatus()[LS_BUSY] = true;
             store->save(f.get());
         }
@@ -928,6 +929,10 @@ vector<shared_ptr<Folder>> SyncWorker::syncFoldersAndLabels()
         Query q = Query().equal("accountId", account->id());
         bool isGmail = session.storedCapabilities()->containsIndex(IMAPCapabilityGmail);
         auto unusedLocalFolders = store->findAllMap<Folder>(q, "id");
+        for (auto it = unusedLocalFolders.begin(); it != unusedLocalFolders.end();) {
+            if (it->second->_data.value("mailbridgeLocal", false)) it = unusedLocalFolders.erase(it);
+            else ++it;
+        }
         auto unusedLocalLabels = store->findAllMap<Label>(q, "id");
         map<string, shared_ptr<Folder>> allFoundCategories {};
         set<string> labelIds {}; // track which IDs are labels vs folders
@@ -1555,6 +1560,15 @@ long long SyncWorker::countBodiesNeeded(Folder & folder) {
  Syncs the top N missing message bodies. Returns true if it did work, false if it did nothing.
  */
 bool SyncWorker::syncMessageBodies(Folder & folder, IMAPFolderStatus & remoteStatus) {
+    if (MailProcessor::retainedArchiveEnabled() && folder.role() != "drafts") {
+        SQLite::Statement missing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL AND EXISTS (SELECT 1 FROM MessageFolder WHERE MessageFolder.messageId = Message.id AND folderId = ? AND remoteUID > 0) ORDER BY date DESC LIMIT 30");
+        missing.bind(1, account->id()); missing.bind(2, folder.id());
+        vector<shared_ptr<Message>> messages;
+        while (missing.executeStep()) messages.push_back(make_shared<Message>(missing));
+        for (auto & message : messages) syncMessageBody(message.get(), &folder);
+        if (!messages.empty()) return true;
+    }
+
     if (!shouldCacheBodiesInFolder(folder)) {
         return false;
     }
@@ -1681,6 +1695,7 @@ void SyncWorker::syncMessageBody(Message * message, Folder * preferredFolder) {
             return;
         }
         processor->retrievedMessageBody(message, messageParser);
+        processor->retainMessage(message, data, *candidate.folder);
         return;
     }
 }

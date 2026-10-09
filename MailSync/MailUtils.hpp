@@ -37,6 +37,8 @@ private:
     static int compareEmails(void * a, void * b, void * context);
 
 public:
+    static string sha256Hex(const string & data);
+    static string retainedMessageKey(const string & email, Data * raw);
     static string toBase58(const unsigned char * pbegin, size_t len);
     static string toBase64(const char * pbegin, size_t len);
     

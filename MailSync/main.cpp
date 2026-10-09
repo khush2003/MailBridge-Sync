@@ -745,6 +745,10 @@ void runListenOnMainThread(shared_ptr<Account> account) {
     time_t lostCINAt = 0;
 
     processor.cleanupTasksAfterLaunch();
+    if (MailProcessor::retainedArchiveEnabled()) {
+        try { MailProcessor{account, &store}.retainedArchiveCommand({{"operation", "list"}}); }
+        catch (const std::exception & ex) { spdlog::get("logger")->error("Retained archive recovery: {}", ex.what()); }
+    }
     
     while(true) {
         AutoreleasePool pool;
@@ -777,6 +781,24 @@ void runListenOnMainThread(shared_ptr<Account> account) {
 
         try {
             string type = packet.count("type") ? packet["type"].get<string>() : "";
+
+            if (type == "mailbridge") {
+                json result = {{"id", packet.value("id", "")}, {"accountId", account->id()}};
+                try {
+                    result["result"] = MailProcessor{account, &store}.retainedArchiveCommand(packet);
+                    if (packet.contains("state")) {
+                        string id = result["result"].at("messageId").get<string>();
+                        Task unread{"ChangeUnreadTask", account->id(), {{"messageIds", {id}}, {"unread", packet["state"].at("unread")}}};
+                        Task starred{"ChangeStarredTask", account->id(), {{"messageIds", {id}}, {"starred", packet["state"].at("starred")}}};
+                        processor.performLocal(&unread); processor.performLocal(&starred);
+                        MailUtils::wakeAllWorkers(); if (fgWorker) fgWorker->idleInterrupt();
+                    }
+                } catch (const std::exception & ex) {
+                    result["error"] = ex.what();
+                }
+                SharedDeltaStream()->emit(DeltaStreamItem("persist", "MailBridgeResult", {result}), 0);
+                continue;
+            }
 
             if (type == "queue-task") {
                 packet["task"]["v"] = 0;
@@ -877,15 +899,7 @@ string exectuablePath = argv[0];
     // Note: On Windows, SASL plugin path is configured in libetpan's mailsasl.c
     // It defaults to the executable directory, but can be overridden via SASL_PATH env var.
 
-#ifndef DEBUG
-    // check path to executable in an obtuse way, prevent re-use of
-    // Mailspring-Sync in products / forks not called Mailspring.
-    transform(exectuablePath.begin(), exectuablePath.end(), exectuablePath.begin(), ::tolower);
-    string headerMessageId = string(USAGE_STRING).substr(59, 4) + string(USAGE_IDENTITY).substr(33, 6);
-    if (exectuablePath.find(headerMessageId) == string::npos) {
-        return 2;
-    }
-#endif
+
 
     // initialize the stanford exception handler
     exceptions::setProgramNameForStackTrace(exectuablePath.c_str());

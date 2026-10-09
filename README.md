@@ -1,3 +1,17 @@
+# MailBridge Sync
+
+MailBridge's GPL-3.0 fork of the Mailspring native mail engine. The desktop client is at https://github.com/khush2003/MailBridge.
+
+With `MAILBRIDGE_ARCHIVE=1`, received mail of every age and successfully submitted outgoing mail are stored as complete RFC 5322 `.eml` files. Independent local placements keep them accessible after IMAP expunge or remote folder deletion. The local index can be rebuilt from those files after a cache reset. Archive state is persisted independently from the IMAP cache.
+
+The `mailbridge` stdin protocol exports retained descriptors and imports checksum-verified messages, attachments, and read/flag/folder state. It returns `MailBridgeResult` acknowledgements. It never treats a server deletion as a local archive deletion. The desktop client handles encrypted Google Drive delivery and acknowledgements from the two PCs.
+
+Integration tests: `python -m pytest test/test_mailbridge.py --servers fake -n 0`, with `MAILSYNC_BIN` pointing to the compiled executable. They exercise actual native processes against scripted IMAP/SMTP servers, including old messages with binary attachments, peer state written to IMAP, cache recovery, and successful SMTP submission when Sent append is refused.
+
+Upstream source and copyright notices remain below and throughout the project.
+
+---
+
 ## Mailspring-Sync
 
 This repository contains the source code for Mailspring's sync engine, a native

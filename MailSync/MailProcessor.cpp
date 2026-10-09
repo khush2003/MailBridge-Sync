@@ -19,6 +19,19 @@
 #include <cctype>
 #include <chrono>
 #include <optional>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <stdexcept>
+#if defined(_MSC_VER)
+#include <io.h>
+#include <Windows.h>
+#undef min
+#undef max
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 #include <thread>
 
 #if defined(_MSC_VER)
@@ -295,6 +308,17 @@ shared_ptr<Message> MailProcessor::updateMessage(const string & messageId, IMAPM
 
     json before = local->toJSON();
     string displaced = store->upsertPlacement(*local, folder, updated.uid, updated);
+    if (retainedArchiveEnabled() && !locked && local->_data.contains("mailbridgeKey") && !folder._data.value("mailbridgeLocal", false)) {
+        for (auto & retained : store->placementsForMessage(local->id())) {
+            if (retained.remoteUID != 0) continue;
+            auto rf = store->folderById(account->id(), retained.folderId);
+            if (rf && rf->_data.value("mailbridgeLocal", false)) {
+                auto flags = updated; flags.uid = 0; flags.draft = false;
+                store->upsertPlacement(*local, *rf, 0, flags);
+            }
+        }
+        if (!p && !_isGmail && folder.role() != "trash" && folder.role() != "spam") moveRetainedPlacement(*local, folder.path(), folder.role());
+    }
 
     if (_isGmail) {
         string role = folder.role();
@@ -898,3 +922,274 @@ void MailProcessor::upsertContacts(Message * message) {
     }
 }
 
+
+
+namespace {
+std::mutex retainedArchiveMutex;
+std::filesystem::path retainedRoot() {
+    return std::filesystem::u8path(MailUtils::getEnvUTF8("CONFIG_DIR_PATH")) / "mailbridge";
+}
+string readRetained(const std::filesystem::path & path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot read retained message");
+    return string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+void durableRetainedWrite(const std::filesystem::path & path, const string & value, bool immutable = true) {
+    std::filesystem::create_directories(path.parent_path());
+    if (immutable && std::filesystem::exists(path)) {
+        if (readRetained(path) != value) throw std::runtime_error("Retained file integrity conflict");
+        return;
+    }
+    auto temp = path;
+    temp += "." + MailUtils::idRandomlyGenerated() + ".tmp";
+#if defined(_MSC_VER)
+    FILE * out = _wfopen(temp.c_str(), L"wb");
+#else
+    FILE * out = fopen(temp.c_str(), "wb");
+#endif
+    if (!out) throw std::runtime_error("Cannot create retained file");
+    bool ok = fwrite(value.data(), 1, value.size(), out) == value.size() && fflush(out) == 0;
+#if defined(_MSC_VER)
+    ok = ok && _commit(_fileno(out)) == 0;
+#else
+    ok = ok && fsync(fileno(out)) == 0;
+#endif
+    ok = fclose(out) == 0 && ok;
+    if (!ok) {
+        std::filesystem::remove(temp);
+        throw std::runtime_error("Cannot durably store retained file");
+    }
+#if defined(_MSC_VER)
+    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::filesystem::remove(temp);
+        throw std::runtime_error("Cannot publish retained file");
+    }
+#else
+    std::filesystem::rename(temp, path);
+#endif
+#if !defined(_MSC_VER)
+    int fd = open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd >= 0) { fsync(fd); close(fd); }
+#endif
+}
+bool isDigest(const string & value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+string retainedEmail(shared_ptr<Account> account) {
+    string email = account->emailAddress();
+    std::transform(email.begin(), email.end(), email.begin(), [](unsigned char c) { return std::tolower(c); });
+    return email;
+}
+}
+
+bool MailProcessor::retainedArchiveEnabled() {
+    return MailUtils::getEnvUTF8("MAILBRIDGE_ARCHIVE") == "1";
+}
+
+void MailProcessor::retainMessage(Message * message, Data * raw, Folder & source) {
+    if (!retainedArchiveEnabled() || !raw || message->isDraft()) return;
+    string bytes(raw->bytes(), raw->length());
+    string digest = MailUtils::sha256Hex(bytes);
+    MessageParser * parser = MessageParser::messageParserWithData(raw);
+    if (!parser || !parser->header()) throw std::runtime_error("Invalid retained MIME message");
+    IMAPMessage identity;
+    identity.setHeader(parser->header());
+    identity.setUid(0);
+    string email = retainedEmail(account);
+    string key = MailUtils::retainedMessageKey(email, raw);
+    string sourcePath = source._data.value("mailbridgeSource", source.path());
+    json descriptor = {{"schema", 1}, {"key", key}, {"digest", digest}, {"email", email},
+        {"folder", sourcePath}, {"role", source.role()}, {"unread", message->isUnread()}, {"starred", message->isStarred()}, {"size", bytes.size()}};
+    {
+        std::lock_guard<std::mutex> lock(retainedArchiveMutex);
+        durableRetainedWrite(retainedRoot() / "blobs" / (digest + ".eml"), bytes);
+        // Only the first capture supplies the immutable origin. Flags are exported live from DB.
+        auto manifest = retainedRoot() / "records" / (key + "-" + digest + ".json");
+        if (!std::filesystem::exists(manifest)) durableRetainedWrite(manifest, descriptor.dump());
+    }
+    MailStoreTransaction transaction{store, "retainMessage"};
+    auto fresh = store->find<Message>(Query().equal("id", message->id()));
+    if (!fresh) throw std::runtime_error("Message disappeared before retention placement");
+    if (!fresh->_data.contains("mailbridgeKey")) moveRetainedPlacement(*fresh, sourcePath, source.role());
+    fresh->_data["mailbridgeKey"] = key;
+    fresh->_data["mailbridgeDigest"] = digest;
+    store->refreshMessageFromPlacements(*fresh);
+    store->save(fresh.get());
+    transaction.commit();
+}
+
+shared_ptr<Message> MailProcessor::importRetainedMessage(Data * raw, const json & descriptor) {
+    string bytes(raw->bytes(), raw->length());
+    string digest = descriptor.at("digest").get<string>();
+    string key = descriptor.at("key").get<string>();
+    if (!isDigest(digest) || !isDigest(key) || MailUtils::sha256Hex(bytes) != digest ||
+        descriptor.at("email").get<string>() != retainedEmail(account) ||
+        key != MailUtils::retainedMessageKey(retainedEmail(account), raw)) {
+        throw std::runtime_error("Retained message integrity/account mismatch");
+    }
+    string origin = descriptor.at("folder").get<string>();
+    if (origin.empty() || origin.size() > 1000) throw std::runtime_error("Invalid retained folder");
+    auto parser = MessageParser::messageParserWithData(raw);
+    if (!parser || !parser->header()) throw std::runtime_error("Invalid retained MIME message");
+    string folderId = MailUtils::idForFolder(account->id(), "Retained/" + origin);
+    shared_ptr<Folder> folder;
+    {
+        MailStoreTransaction transaction{store, "importRetainedFolder"};
+        folder = store->find<Folder>(Query().equal("id", folderId));
+        if (!folder) {
+            folder = make_shared<Folder>(folderId, account->id(), 0);
+            folder->setPath("Retained/" + origin);
+            folder->_data["mailbridgeLocal"] = true;
+            folder->_data["mailbridgeSource"] = origin;
+            folder->_data["mailbridgeRole"] = descriptor.value("role", "");
+            folder->localStatus() = {{LS_BUSY, false}, {LS_SYNCED_MIN_UID, 1}};
+            store->save(folder.get());
+        }
+        transaction.commit();
+    }
+    SQLite::Statement existing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND json_extract(data, '$.mailbridgeKey') = ? LIMIT 1");
+    existing.bind(1, account->id()); existing.bind(2, key);
+    if (existing.executeStep()) {
+        auto message = make_shared<Message>(existing);
+        // Preserve current local state when receiving another transport copy of the same mail.
+        retainMessage(message.get(), raw, *folder);
+        return store->find<Message>(Query().equal("id", message->id()));
+    }
+    IMAPMessage remote;
+    remote.setHeader(parser->header());
+    remote.setUid(0);
+    remote.setFlags((MessageFlag)((descriptor.value("unread", false) ? 0 : MessageFlagSeen) | (descriptor.value("starred", false) ? MessageFlagFlagged : 0)));
+    auto message = insertFallbackToUpdateMessage(&remote, *folder, time(0));
+    retrievedMessageBody(message.get(), parser);
+    retainMessage(message.get(), raw, *folder);
+    auto fresh = store->find<Message>(Query().equal("id", message->id()));
+    if (fresh->_data.value("mailbridgeKey", "") != key) {
+        throw std::runtime_error("Retained identity mismatch");
+    }
+    return fresh;
+}
+
+json MailProcessor::retainedArchiveCommand(const json & packet) {
+    if (!retainedArchiveEnabled()) throw std::runtime_error("Retention is disabled");
+    string operation = packet.at("operation").get<string>();
+    if (operation == "list") {
+        json records = json::array();
+        auto root = retainedRoot() / "records";
+        if (std::filesystem::exists(root)) {
+            for (auto & entry : std::filesystem::directory_iterator(root)) {
+                if (entry.path().extension() != ".json") continue;
+                json d = json::parse(readRetained(entry.path()));
+                if (d.at("email").get<string>() != retainedEmail(account)) continue;
+                SQLite::Statement query(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND json_extract(data, '$.mailbridgeKey') = ? LIMIT 1");
+                query.bind(1, account->id()); query.bind(2, d.at("key").get<string>());
+                if (!query.executeStep()) {
+                    string bytes = readRetained(retainedRoot() / "blobs" / (d.at("digest").get<string>() + ".eml"));
+                    auto snapshotPath = retainedRoot() / "state" / (d.at("key").get<string>() + ".json");
+                    bool hadState = std::filesystem::exists(snapshotPath);
+                    json previousState = hadState ? json::parse(readRetained(snapshotPath)) : d;
+                    auto restored = importRetainedMessage(Data::dataWithBytes(bytes.data(), (unsigned int)bytes.size()), d);
+                    auto statePath = retainedRoot() / "state" / (d.at("key").get<string>() + ".json");
+                    if (std::filesystem::exists(statePath)) {
+                        auto saved = previousState;
+                        MailStoreTransaction transaction{store, "restoreLocalRetainedState"};
+                        moveRetainedPlacement(*restored, saved.at("folder").get<string>(), saved.value("role", ""));
+                        store->setPlacementUnread(*restored, saved.at("unread").get<bool>());
+                        store->setPlacementStarred(*restored, saved.at("starred").get<bool>());
+                        store->refreshMessageFromPlacements(*restored); store->save(restored.get());
+                        transaction.commit();
+                    }
+                    auto journalPath = retainedRoot() / "sync-journal.json";
+                    if (!hadState && std::filesystem::exists(journalPath)) {
+                        auto journal = json::parse(readRetained(journalPath));
+                        string key = d.at("key").get<string>();
+                        if (journal["messages"].contains(key)) {
+                            auto state = journal["messages"][key]["state"];
+                            MailStoreTransaction transaction{store, "restoreRetainedState"};
+                            if (state.contains("folder")) moveRetainedPlacement(*restored, state["folder"]["value"].get<string>());
+                            store->setPlacementUnread(*restored, state["unread"]["value"].get<bool>());
+                            store->setPlacementStarred(*restored, state["starred"]["value"].get<bool>());
+                            store->refreshMessageFromPlacements(*restored); store->save(restored.get());
+                            transaction.commit();
+                        }
+                    }
+                    query.reset();
+                    if (!query.executeStep()) throw std::runtime_error("Unable to rebuild retained index");
+                }
+                Message message(query);
+                d["messageId"] = message.id();
+                d["unread"] = message.isUnread(); d["starred"] = message.isStarred();
+                d["folder"] = message._data.value("mailbridgeFolder", d.at("folder").get<string>());
+                d["role"] = message._data.value("mailbridgeRole", d.value("role", ""));
+                records.push_back(d);
+            }
+        }
+        SQLite::Statement pending(store->db(), "SELECT COUNT(*) FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL");
+        pending.bind(1, account->id()); pending.executeStep();
+        bool syncing = false;
+        for (auto & folder : store->findAll<Folder>(Query().equal("accountId", account->id()))) {
+            if (!folder->_data.value("mailbridgeLocal", false) && folder->localStatus().is_object() && folder->localStatus().value(LS_BUSY, false)) syncing = true;
+        }
+        return {{"records", records}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}};
+    }
+    string digest = packet.at("descriptor").at("digest").get<string>();
+    if (!isDigest(digest)) throw std::runtime_error("Invalid retained digest");
+    auto blob = retainedRoot() / "blobs" / (digest + ".eml");
+    string bytes = readRetained(blob);
+    auto message = importRetainedMessage(Data::dataWithBytes(bytes.data(), (unsigned int)bytes.size()), packet.at("descriptor"));
+    if (packet.contains("state")) {
+        MailStoreTransaction transaction{store, "retainedMessageState"};
+        if (packet["state"].contains("folder")) moveRetainedPlacement(*message, packet["state"].at("folder").get<string>());
+        store->setPlacementUnread(*message, packet["state"].at("unread").get<bool>());
+        store->setPlacementStarred(*message, packet["state"].at("starred").get<bool>());
+        store->refreshMessageFromPlacements(*message);
+        store->save(message.get());
+        transaction.commit();
+    }
+    return {{"messageId", message->id()}, {"key", packet.at("descriptor").at("key")}};
+}
+
+
+// Called inside the caller's MailStore transaction, so folder and message deltas commit together.
+void MailProcessor::moveRetainedPlacement(Message & message, const string & origin, const string & role) {
+    if (origin.empty() || origin.size() > 1000) throw std::runtime_error("Invalid retained folder name");
+    string actualRole = role;
+    if (actualRole.empty()) {
+        auto source = store->find<Folder>(Query().equal("accountId", account->id()).equal("path", origin));
+        if (source) actualRole = source->role();
+    }
+    string folderId = MailUtils::idForFolder(account->id(), "Retained/" + origin);
+    auto folder = store->find<Folder>(Query().equal("id", folderId));
+    if (!folder) {
+        folder = make_shared<Folder>(folderId, account->id(), 0);
+        folder->setPath("Retained/" + origin);
+        folder->_data["mailbridgeLocal"] = true;
+        folder->_data["mailbridgeSource"] = origin;
+        folder->_data["mailbridgeRole"] = actualRole;
+        folder->localStatus() = {{LS_BUSY, false}, {LS_SYNCED_MIN_UID, 1}};
+        store->save(folder.get());
+    }
+    auto placements = store->placementsForMessage(message.id());
+    MessageAttributes attrs{0, message.isUnread(), message.isStarred(), false, {}};
+    store->upsertPlacement(message, *folder, 0, attrs);
+    for (auto & p : placements) {
+        if (p.remoteUID != 0 || p.folderId == folderId) continue;
+        auto old = store->folderById(account->id(), p.folderId);
+        if (old && old->_data.value("mailbridgeLocal", false)) store->removePlacement(message, p.folderId, 0);
+    }
+    message._data["mailbridgeFolder"] = origin;
+    message._data["mailbridgeRole"] = actualRole;
+    store->refreshMessageFromPlacements(message);
+}
+
+
+void MailProcessor::writeRetainedState(Message & message) {
+    if (!retainedArchiveEnabled() || !message._data.contains("mailbridgeKey")) return;
+    auto key = message._data["mailbridgeKey"].get<string>();
+    if (!isDigest(key)) throw std::runtime_error("Invalid retained state identity");
+    json state = {{"unread", message.isUnread()}, {"starred", message.isStarred()},
+        {"folder", message._data.value("mailbridgeFolder", "INBOX")}, {"role", message._data.value("mailbridgeRole", "")}};
+    std::lock_guard<std::mutex> lock(retainedArchiveMutex);
+    durableRetainedWrite(retainedRoot() / "state" / (key + ".json"), state.dump(), false);
+}

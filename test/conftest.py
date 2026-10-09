@@ -7,7 +7,8 @@ import pytest
 
 # `kill -USR1 <pid>` dumps every thread's stack, for when a wait looks stuck. Under xdist the
 # pid is the worker's, which names its artifacts directory: test/runs/session-<pid>/.
-faulthandler.register(signal.SIGUSR1, all_threads=True)
+if hasattr(signal, "SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))

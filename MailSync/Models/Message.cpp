@@ -12,6 +12,7 @@
 #include "Message.hpp"
 #include "MailStore.hpp"
 #include "MailUtils.hpp"
+#include "MailProcessor.hpp"
 #include "Folder.hpp"
 #include "File.hpp"
 #include "Thread.hpp"
@@ -558,6 +559,7 @@ void Message::_updateRulesReady(MailStore * store) {
 
 void Message::afterSave(MailStore * store) {
     MailModel::afterSave(store);
+    MailProcessor::writeRetainedState(*this);
 
     // if we have a thread, keep the thread's folder, label, and unread counters
     // in sync by providing it with a before + after snapshot of this message.

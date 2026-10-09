@@ -47,7 +47,7 @@ void Folder::setPath(string path) {
 }
 
 string Folder::role() const {
-    return _data["role"].get<string>();
+    return _data.value("mailbridgeLocal", false) ? _data.value("mailbridgeRole", "") : _data["role"].get<string>();
 }
 
 void Folder::setRole(string role) {

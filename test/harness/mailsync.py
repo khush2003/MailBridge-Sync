@@ -184,16 +184,7 @@ class MailsyncProcess:
     # -- lifecycle ----------------------------------------------------------------------
 
     def _launchable_binary(self, binary: Path) -> Path:
-        # Release builds refuse to start unless argv[0] contains "mailspring" (main.cpp,
-        # the executable-path check). A symlink inside the work dir satisfies it regardless
-        # of where the real binary lives.
-        link_dir = self.work_dir / "mailspring-bin"
-        link_dir.mkdir(parents=True, exist_ok=True)
-        link = link_dir / "mailsync"
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(binary)
-        return link
+        return binary
 
     def _env(self) -> dict:
         env = dict(os.environ)
