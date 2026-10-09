@@ -60,6 +60,7 @@ public:
     bool retrievedFileData(File * file, Data * data);
     static bool retainedArchiveEnabled();
     void moveRetainedPlacement(Message & message, const string & origin, const string & role = "");
+    void hideRetainedPlacement(Message & message, const string & origin, const string & role);
     static void writeRetainedState(Message & message);
     void retainMessage(Message * message, Data * raw, Folder & source);
     shared_ptr<Message> importRetainedMessage(Data * raw, const json & descriptor);

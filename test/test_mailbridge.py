@@ -153,3 +153,63 @@ def test_smtp_success_is_retained_before_sent_folder_append(tmp_path):
     finally:
         if proc: proc.stop()
         server.stop()
+
+
+def test_local_delete_does_not_publish_deletion_and_survives_cache_reset(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        uid = server.append('INBOX', message(41004), flags=())
+        account = account_json(**server.account_kwargs())
+        proc = MailsyncProcess(account, tmp_path, binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: list((proc.config_dir / 'mailbridge' / 'records').glob('*.json')),
+                      60, what='retained copy')
+        record = command(proc, 'list')['records'][0]
+        trash = proc.db_folders()['Trash']
+        proc.queue_task({'__cls': 'ChangeFolderTask', 'messageIds': [record['messageId']],
+                         'folder': {'id': trash['id'], 'path': 'Trash', 'role': 'trash'}})
+        def hidden():
+            with proc.db() as db:
+                row = db.execute('SELECT data FROM Message WHERE id = ?', (record['messageId'],)).fetchone()
+                return row and json.loads(row['data']).get('mailbridgeHidden')
+        proc.wait_for(hidden, 30, what='local deletion')
+        assert command(proc, 'list')['records'][0]['folder'] == 'INBOX'
+        command(proc, 'import', descriptor=record, state={'unread': False, 'starred': True, 'folder': 'INBOX'})
+        assert hidden(), 'peer state must not restore locally deleted mail'
+        server.expunge('INBOX', [uid])
+        proc.stop()
+        for name in ('edgehill.db', 'edgehill.db-wal', 'edgehill.db-shm'):
+            (proc.config_dir / name).unlink(missing_ok=True)
+        proc = MailsyncProcess(account, tmp_path, binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: command(proc, 'list')['records'], 30, what='archive rebuild')
+        assert hidden()
+        with proc.db() as db:
+            retained = db.execute('SELECT Folder.path FROM MessageFolder JOIN Folder ON Folder.id = MessageFolder.folderId WHERE messageId = ? AND remoteUID = 0', (record['messageId'],)).fetchall()
+            assert [r['path'] for r in retained] == ['Retained/Trash']
+    finally:
+        if proc: proc.stop()
+        server.stop()
+
+
+def test_pst_export_imports_complete_eml_without_uploading_it_to_imap(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path, binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start(); proc.wait_quiescent(timeout=60)
+        imports = proc.config_dir / 'mailbridge' / 'imports'
+        imports.mkdir(parents=True, exist_ok=True)
+        filename = '1234567890abcdef1234567890abcdef.eml'
+        raw = message(41005, age_days=9000, attachment=('pst-report.bin', b'old PST attachment'))
+        (imports / filename).write_bytes(raw)
+        command(proc, 'import-file', file=filename, folder='Sent', role='sent', unread=False, starred=True)
+        record = command(proc, 'list')['records'][0]
+        assert record['role'] == 'sent' and not record['unread'] and record['starred']
+        assert record['digest'] == hashlib.sha256(raw).hexdigest()
+        assert not server.store.get('Sent').messages
+        assert any(p.read_bytes() == b'old PST attachment' for p in (proc.config_dir / 'files').rglob('*') if p.is_file())
+    finally:
+        if proc: proc.stop()
+        server.stop()

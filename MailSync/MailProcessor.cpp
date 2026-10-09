@@ -317,7 +317,7 @@ shared_ptr<Message> MailProcessor::updateMessage(const string & messageId, IMAPM
                 store->upsertPlacement(*local, *rf, 0, flags);
             }
         }
-        if (!p && !_isGmail && folder.role() != "trash" && folder.role() != "spam") moveRetainedPlacement(*local, folder.path(), folder.role());
+        if (!p && !local->_data.value("mailbridgeHidden", false) && !_isGmail && folder.role() != "trash" && folder.role() != "spam") moveRetainedPlacement(*local, folder.path(), folder.role());
     }
 
     if (_isGmail) {
@@ -1095,6 +1095,7 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
                         auto saved = previousState;
                         MailStoreTransaction transaction{store, "restoreLocalRetainedState"};
                         moveRetainedPlacement(*restored, saved.at("folder").get<string>(), saved.value("role", ""));
+                        if (saved.value("hidden", false)) hideRetainedPlacement(*restored, saved.value("hiddenFolder", "Trash"), "trash");
                         store->setPlacementUnread(*restored, saved.at("unread").get<bool>());
                         store->setPlacementStarred(*restored, saved.at("starred").get<bool>());
                         store->refreshMessageFromPlacements(*restored); store->save(restored.get());
@@ -1133,6 +1134,26 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
         }
         return {{"records", records}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}};
     }
+    if (operation == "import-file") {
+        string filename = packet.at("file").get<string>();
+        if (filename.size() != 36 || filename.substr(32) != ".eml" ||
+            filename.substr(0, 32).find_first_not_of("0123456789abcdef") != string::npos) throw std::runtime_error("Invalid import file");
+        auto sourcePath = retainedRoot() / "imports" / filename;
+        if (std::filesystem::is_symlink(sourcePath)) throw std::runtime_error("Invalid import source");
+        string bytes = readRetained(sourcePath);
+        auto raw = Data::dataWithBytes(bytes.data(), (unsigned int)bytes.size());
+        string role = packet.value("role", "");
+        string origin = packet.value("folder", "Imported");
+        if (!role.empty()) {
+            auto source = store->find<Folder>(Query().equal("accountId", account->id()).equal("role", role));
+            if (source) origin = source->path();
+        }
+        json descriptor = {{"schema", 1}, {"email", retainedEmail(account)}, {"folder", origin}, {"role", role},
+            {"key", MailUtils::retainedMessageKey(retainedEmail(account), raw)}, {"digest", MailUtils::sha256Hex(bytes)},
+            {"size", bytes.size()}, {"unread", packet.value("unread", false)}, {"starred", packet.value("starred", false)}};
+        auto imported = importRetainedMessage(raw, descriptor);
+        return {{"messageId", imported->id()}, {"key", descriptor["key"]}};
+    }
     string digest = packet.at("descriptor").at("digest").get<string>();
     if (!isDigest(digest)) throw std::runtime_error("Invalid retained digest");
     auto blob = retainedRoot() / "blobs" / (digest + ".eml");
@@ -1140,7 +1161,10 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
     auto message = importRetainedMessage(Data::dataWithBytes(bytes.data(), (unsigned int)bytes.size()), packet.at("descriptor"));
     if (packet.contains("state")) {
         MailStoreTransaction transaction{store, "retainedMessageState"};
-        if (packet["state"].contains("folder")) moveRetainedPlacement(*message, packet["state"].at("folder").get<string>());
+        if (packet["state"].contains("folder")) {
+            if (message->_data.value("mailbridgeHidden", false)) message->_data["mailbridgeFolder"] = packet["state"].at("folder");
+            else moveRetainedPlacement(*message, packet["state"].at("folder").get<string>());
+        }
         store->setPlacementUnread(*message, packet["state"].at("unread").get<bool>());
         store->setPlacementStarred(*message, packet["state"].at("starred").get<bool>());
         store->refreshMessageFromPlacements(*message);
@@ -1178,18 +1202,31 @@ void MailProcessor::moveRetainedPlacement(Message & message, const string & orig
         auto old = store->folderById(account->id(), p.folderId);
         if (old && old->_data.value("mailbridgeLocal", false)) store->removePlacement(message, p.folderId, 0);
     }
+    message._data["mailbridgeHidden"] = false;
     message._data["mailbridgeFolder"] = origin;
     message._data["mailbridgeRole"] = actualRole;
     store->refreshMessageFromPlacements(message);
 }
 
 
+// Local deletion moves the retained copy on this PC without exporting a deletion.
+void MailProcessor::hideRetainedPlacement(Message & message, const string & origin, const string & role) {
+    auto logicalFolder = message._data.value("mailbridgeFolder", "INBOX");
+    auto logicalRole = message._data.value("mailbridgeRole", "");
+    moveRetainedPlacement(message, origin, role);
+    message._data["mailbridgeFolder"] = logicalFolder;
+    message._data["mailbridgeRole"] = logicalRole;
+    message._data["mailbridgeHidden"] = true;
+    message._data["mailbridgeHiddenFolder"] = origin;
+}
+
 void MailProcessor::writeRetainedState(Message & message) {
     if (!retainedArchiveEnabled() || !message._data.contains("mailbridgeKey")) return;
     auto key = message._data["mailbridgeKey"].get<string>();
     if (!isDigest(key)) throw std::runtime_error("Invalid retained state identity");
     json state = {{"unread", message.isUnread()}, {"starred", message.isStarred()},
-        {"folder", message._data.value("mailbridgeFolder", "INBOX")}, {"role", message._data.value("mailbridgeRole", "")}};
+        {"folder", message._data.value("mailbridgeFolder", "INBOX")}, {"role", message._data.value("mailbridgeRole", "")},
+        {"hidden", message._data.value("mailbridgeHidden", false)}, {"hiddenFolder", message._data.value("mailbridgeHiddenFolder", "Trash")}};
     std::lock_guard<std::mutex> lock(retainedArchiveMutex);
     durableRetainedWrite(retainedRoot() / "state" / (key + ".json"), state.dump(), false);
 }

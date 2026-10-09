@@ -585,13 +585,12 @@ void _applyFolder(MailStore * store, Message * msg, const vector<Placement> & pl
     json shownIn = json::array();
     if (MailProcessor::retainedArchiveEnabled() && msg->_data.contains("mailbridgeKey")) {
         string role = data["folder"].value("role", "");
-        if (role != "trash" && role != "spam") {
-            // Accounts are supplied by the owning task processor; reconstruct the minimum archive identity here.
-            json accountJSON = {{"id", msg->accountId()}, {"emailAddress", "local"}};
-            auto account = make_shared<Account>(accountJSON);
-            string origin = data["folder"].value("mailbridgeSource", data["folder"].value("path", ""));
-            MailProcessor{account, store}.moveRetainedPlacement(*msg, origin, role);
-        }
+        json accountJSON = {{"id", msg->accountId()}, {"emailAddress", "local"}};
+        auto account = make_shared<Account>(accountJSON);
+        string origin = data["folder"].value("mailbridgeSource", data["folder"].value("path", ""));
+        MailProcessor processor{account, store};
+        if (role == "trash" || role == "spam") processor.hideRetainedPlacement(*msg, origin, role);
+        else processor.moveRetainedPlacement(*msg, origin, role);
     }
     for (auto & move : _movesForMessage(store, msg, placements, data)) {
         if (move.placement.reportedFolderId() != move.destFolderId) {

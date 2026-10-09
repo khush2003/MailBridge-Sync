@@ -1561,11 +1561,22 @@ long long SyncWorker::countBodiesNeeded(Folder & folder) {
  */
 bool SyncWorker::syncMessageBodies(Folder & folder, IMAPFolderStatus & remoteStatus) {
     if (MailProcessor::retainedArchiveEnabled() && folder.role() != "drafts") {
-        SQLite::Statement missing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL AND EXISTS (SELECT 1 FROM MessageFolder WHERE MessageFolder.messageId = Message.id AND folderId = ? AND remoteUID > 0) ORDER BY date DESC LIMIT 30");
+        SQLite::Statement missing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL AND COALESCE(json_extract(data, '$.mailbridgeRetryAt'), 0) <= strftime('%s', 'now') AND EXISTS (SELECT 1 FROM MessageFolder WHERE MessageFolder.messageId = Message.id AND folderId = ? AND remoteUID > 0) ORDER BY date DESC LIMIT 30");
         missing.bind(1, account->id()); missing.bind(2, folder.id());
         vector<shared_ptr<Message>> messages;
         while (missing.executeStep()) messages.push_back(make_shared<Message>(missing));
-        for (auto & message : messages) syncMessageBody(message.get(), &folder);
+        for (auto & message : messages) {
+            syncMessageBody(message.get(), &folder);
+            MailStoreTransaction transaction{store, "retainedBodyRetry"};
+            auto fresh = store->find<Message>(Query().equal("id", message->id()));
+            if (fresh && !fresh->_data.contains("mailbridgeKey")) {
+                int attempts = min(8, fresh->_data.value("mailbridgeFetchAttempts", 0) + 1);
+                fresh->_data["mailbridgeFetchAttempts"] = attempts;
+                fresh->_data["mailbridgeRetryAt"] = time(0) + min(3600, 30 * (1 << attempts));
+                store->save(fresh.get());
+            }
+            transaction.commit();
+        }
         if (!messages.empty()) return true;
     }
 
