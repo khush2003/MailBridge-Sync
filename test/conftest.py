@@ -32,8 +32,10 @@ def pytest_sessionstart(session):
     from harness.servers import cyrus, dovecot
     available = available_server_kinds()
     selected = set(config.getoption("--servers").split(",")) if config.getoption("--servers") else available
-    # conformance/ compares against Dovecot whatever --servers says.
-    if "dovecot" in available and dovecot.default_mode() == "docker":
+    # Conformance tests need Dovecot even when the scenarios select only fake servers.
+    conformance_selected = any("conformance" in Path(arg.split("::")[0]).parts or
+        (Path(arg.split("::")[0]) / "conformance").is_dir() for arg in config.args)
+    if "dovecot" in available and ("dovecot" in selected or conformance_selected) and dovecot.default_mode() == "docker":
         dovecot.ensure_image()
     if "cyrus" in available & selected:
         cyrus.ensure_image()

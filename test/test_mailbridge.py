@@ -254,3 +254,31 @@ def test_encrypted_sync_runs_end_to_end_between_two_real_engines(tmp_path):
         if httpd: httpd.shutdown(); httpd.server_close()
         for proc in processes.values(): proc.stop()
         server.stop()
+
+
+def test_unreadable_message_does_not_starve_older_mail_or_claim_complete_capture(tmp_path):
+    import re
+    server = FakeServer().start()
+    proc = None
+    try:
+        server.append('INBOX', message(41100), flags=())
+        for ident in range(41101, 41136): server.append('INBOX', message(ident, age_days=1000), flags=())
+        failures = []
+        def refuse_body(session, cmd, rest):
+            rest = rest.decode() if isinstance(rest, bytes) else rest
+            if cmd == 'UID FETCH' and re.match(r'^\s*1(?:\s|$)', rest, re.I) and 'BODY.PEEK[]' in rest.upper():
+                failures.append(rest)
+                session.reject_next = ('SERVERBUG', 'This body cannot currently be fetched')
+        server.imap.add_hook('before_command', refuse_body)
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path, binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: len(list((proc.config_dir / 'mailbridge' / 'records').glob('*.json'))) == 35,
+                      60, what='older mail retained despite unreadable first message')
+        proc.wait_quiescent(timeout=30)
+        status = command(proc, 'list')
+        assert status['unretained'] == 1
+        assert status['mailSyncInitialized'] is True
+        assert 1 <= len(failures) <= 4, 'failed body must back off instead of spinning'
+    finally:
+        if proc: proc.stop()
+        server.stop()

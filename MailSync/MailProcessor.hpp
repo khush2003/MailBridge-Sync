@@ -59,6 +59,7 @@ public:
     void retrievedMessageBody(Message * message, MessageParser * parser);
     bool retrievedFileData(File * file, Data * data);
     static bool retainedArchiveEnabled();
+    static void setRetainedMailboxReady(bool ready);
     void moveRetainedPlacement(Message & message, const string & origin, const string & role = "");
     void hideRetainedPlacement(Message & message, const string & origin, const string & role);
     static void writeRetainedState(Message & message);

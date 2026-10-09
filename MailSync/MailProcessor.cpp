@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <atomic>
 #include <stdexcept>
 #if defined(_MSC_VER)
 #include <io.h>
@@ -926,6 +927,7 @@ void MailProcessor::upsertContacts(Message * message) {
 
 namespace {
 std::mutex retainedArchiveMutex;
+std::atomic<bool> retainedMailboxReady{false};
 std::filesystem::path retainedRoot() {
     return std::filesystem::u8path(MailUtils::getEnvUTF8("CONFIG_DIR_PATH")) / "mailbridge";
 }
@@ -1071,6 +1073,8 @@ shared_ptr<Message> MailProcessor::importRetainedMessage(Data * raw, const json 
     return fresh;
 }
 
+void MailProcessor::setRetainedMailboxReady(bool ready) { retainedMailboxReady.store(ready); }
+
 json MailProcessor::retainedArchiveCommand(const json & packet) {
     if (!retainedArchiveEnabled()) throw std::runtime_error("Retention is disabled");
     string operation = packet.at("operation").get<string>();
@@ -1132,7 +1136,7 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
         for (auto & folder : store->findAll<Folder>(Query().equal("accountId", account->id()))) {
             if (!folder->_data.value("mailbridgeLocal", false) && folder->localStatus().is_object() && folder->localStatus().value(LS_BUSY, false)) syncing = true;
         }
-        return {{"records", records}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}};
+        return {{"records", records}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}, {"mailSyncInitialized", retainedMailboxReady.load()}};
     }
     if (operation == "import-file") {
         string filename = packet.at("file").get<string>();

@@ -353,6 +353,8 @@ bool SyncWorker::syncNow()
 {
     AutoreleasePool pool;
     bool syncAgainImmediately = false;
+    bool retainedFullCoverage = true;
+    MailProcessor::setRetainedMailboxReady(false);
 
     // A message orphaned before this instant has had every folder that this pass covers in
     // full scanned since, so a copy that moved into one of them has been recorded. Recorded
@@ -373,6 +375,7 @@ bool SyncWorker::syncNow()
             foldersPastOrphanWait.erase(folder.id());
             return;
         }
+        retainedFullCoverage = false;
         time_t coveredAt = folderCoveredAt.count(folder.id()) ? folderCoveredAt[folder.id()] : 0;
         if (walkProgressed) {
             sweepBefore = min(sweepBefore, coveredAt);
@@ -775,6 +778,7 @@ bool SyncWorker::syncNow()
     // without metadata, once the destination catches up.
     processor->sweepExpiredOrphans(sweepBefore, passStartedAt);
     
+    MailProcessor::setRetainedMailboxReady(retainedFullCoverage && !syncAgainImmediately);
     logger->info("Sync loop complete.");
     iterationsSinceLaunch += 1;
 
@@ -1561,7 +1565,7 @@ long long SyncWorker::countBodiesNeeded(Folder & folder) {
  */
 bool SyncWorker::syncMessageBodies(Folder & folder, IMAPFolderStatus & remoteStatus) {
     if (MailProcessor::retainedArchiveEnabled() && folder.role() != "drafts") {
-        SQLite::Statement missing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL AND COALESCE(json_extract(data, '$.mailbridgeRetryAt'), 0) <= strftime('%s', 'now') AND EXISTS (SELECT 1 FROM MessageFolder WHERE MessageFolder.messageId = Message.id AND folderId = ? AND remoteUID > 0) ORDER BY date DESC LIMIT 30");
+        SQLite::Statement missing(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND draft = 0 AND json_extract(data, '$.mailbridgeKey') IS NULL AND COALESCE(json_extract(data, '$.mailbridgeRetryAt'), 0) <= CAST(strftime('%s', 'now') AS INTEGER) AND EXISTS (SELECT 1 FROM MessageFolder WHERE MessageFolder.messageId = Message.id AND folderId = ? AND remoteUID > 0) ORDER BY date DESC LIMIT 30");
         missing.bind(1, account->id()); missing.bind(2, folder.id());
         vector<shared_ptr<Message>> messages;
         while (missing.executeStep()) messages.push_back(make_shared<Message>(missing));
