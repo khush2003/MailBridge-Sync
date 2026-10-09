@@ -1281,7 +1281,8 @@ void TaskProcessor::performRemoteChangeOnMessages(Task * task, bool isMove, Remo
             int suc = safe->syncUnsavedChanges() - 1;
             safe->setSyncUnsavedChanges(suc);
             if (suc == 0) {
-                safe->setSyncedAt(time(0));
+                // Fence scans started in this same second before the remote flag write.
+                safe->setSyncedAt(time(0) + ((!failure && MailProcessor::retainedArchiveEnabled()) ? 1 : 0));
             }
             store->save(safe.get());
         }

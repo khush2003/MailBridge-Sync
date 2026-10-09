@@ -98,7 +98,7 @@ MailProcessor::MailProcessor(shared_ptr<Account> account, MailStore * store) :
     account(account),
     logger(spdlog::get("logger"))
 {
-
+    if (retainedArchiveEnabled()) store->db().exec("CREATE INDEX IF NOT EXISTS MessageMailBridgeKey ON Message(accountId, json_extract(data, '$.mailbridgeKey'))");
 }
 
 // Detected from the X-GM-EXT-1 capability rather than the account's provider, which is
@@ -1188,6 +1188,7 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
             if (message->_data.value("mailbridgeHidden", false)) message->_data["mailbridgeFolder"] = packet["state"].at("folder");
             else moveRetainedPlacement(*message, packet["state"].at("folder").get<string>());
         }
+        message->setSyncedAt(time(0) + 24 * 60 * 60);
         store->setPlacementUnread(*message, packet["state"].at("unread").get<bool>());
         store->setPlacementStarred(*message, packet["state"].at("starred").get<bool>());
         store->refreshMessageFromPlacements(*message);

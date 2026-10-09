@@ -59,6 +59,8 @@ def test_old_mail_and_attachments_survive_expunge_and_import(tmp_path):
         assert second['starred'] and not second['unread']
         import sqlite3
         with sqlite3.connect(b.db_path) as db:
+            plan = db.execute("EXPLAIN QUERY PLAN SELECT Message.* FROM Message WHERE accountId = ? AND json_extract(data, '$.mailbridgeKey') = ?", (b.account['id'], record['key'])).fetchall()
+            assert any('MessageMailBridgeKey' in row[3] for row in plan)
             assert db.execute('SELECT COUNT(*) FROM File').fetchone()[0] == 1
             body = db.execute('SELECT value FROM MessageBody WHERE id = ?', (imported['messageId'],)).fetchone()[0]
             assert 'body of message 41001' in body
