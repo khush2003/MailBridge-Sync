@@ -790,6 +790,7 @@ void TaskProcessor::cleanupOldTasksAtRuntime() {
 // PerformLocal is run from the main thread as tasks are received from the client
 
 void TaskProcessor::performLocal(Task * task) {
+    bool completedLocally = false;
     string cname = task->constructorName();
     
     logger->info("[{}] Running {} performLocal:", task->id(), cname);
@@ -847,7 +848,11 @@ void TaskProcessor::performLocal(Task * task) {
             // nothing
 
         } else if (cname == "GetMessageRFC2822Task") {
-            // nothing
+            auto message = store->find<Message>(Query().equal("id", task->data().at("messageId").get<string>()));
+            if (MailProcessor::retainedArchiveEnabled() && message && message->_data.contains("mailbridgeDigest")) {
+                performRemoteGetMessageRFC2822(task);
+                completedLocally = true;
+            }
 
         } else if (cname == "GetManyRFC2822Task") {
             // nothing — all work happens in performRemote
@@ -881,7 +886,7 @@ void TaskProcessor::performLocal(Task * task) {
         }
 
         logger->info("[{}] -- Succeeded. Changing status to `remote`", task->id());
-        task->setStatus("remote");
+        task->setStatus(completedLocally ? "complete" : "remote");
 
     } catch (SyncException & ex) {
         logger->error("[{}] -- Failed ({}). Changing status to `complete`", task->id(), ex.toJSON().dump());
@@ -2639,8 +2644,8 @@ void TaskProcessor::performRemoteGetMessageRFC2822(Task * task) {
         throw SyncException("not-found", "Message not found for RFC2822 fetch", false);
     }
 
-    Data * data = nullptr;
-    for (auto & copy : store->fetchableCopiesOfMessage(*msg)) {
+    Data * data = MailProcessor::retainedRawForMessage(*msg);
+    if (data == nullptr) for (auto & copy : store->fetchableCopiesOfMessage(*msg)) {
         IMAPProgress cb;
         ErrorCode err = ErrorNone;
         data = session->fetchMessageByUID(AS_MCSTR(copy.folder->path()), copy.uid, &cb, &err);

@@ -1092,6 +1092,15 @@ void MailProcessor::stageRetainedMessage(Data * raw) {
     durableRetainedWrite(retainedRoot() / "blobs" / (MailUtils::sha256Hex(bytes) + ".eml"), bytes);
 }
 
+Data * MailProcessor::retainedRawForMessage(Message & message) {
+    if (!retainedArchiveEnabled() || !message._data.contains("mailbridgeDigest")) return nullptr;
+    string digest = message._data.at("mailbridgeDigest").get<string>();
+    if (!isDigest(digest)) throw std::runtime_error("Invalid retained message digest");
+    string bytes = readRetained(retainedRoot() / "blobs" / (digest + ".eml"));
+    if (MailUtils::sha256Hex(bytes) != digest) throw std::runtime_error("Retained message checksum mismatch");
+    return Data::dataWithBytes(bytes.data(), (unsigned int)bytes.size());
+}
+
 void MailProcessor::setRetainedMailboxReady(bool ready) { retainedMailboxReady.store(ready); }
 
 json MailProcessor::retainedArchiveCommand(const json & packet) {

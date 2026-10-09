@@ -382,3 +382,31 @@ def test_self_addressed_send_stays_in_retained_sent_even_if_inbox_capture_wins_r
     finally:
         if proc: proc.stop()
         server.stop()
+
+
+def test_retained_original_exports_without_server_or_network(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        raw = message(41012, attachment=('export.bin', b'complete original\x00bytes'))
+        uid = server.append('INBOX', raw, flags=())
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path, binary=BIN,
+                               env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: len(list((proc.config_dir / 'mailbridge' / 'records').glob('*.json'))) == 1,
+                      60, what='capture before offline export')
+        record = command(proc, 'list')['records'][0]
+        server.expunge('INBOX', [uid]); proc.wake(); proc.wait_quiescent(timeout=60)
+        server.stop()
+        output = tmp_path / 'original.eml'
+        task_id = proc.queue_task({'__cls': 'GetMessageRFC2822Task', 'messageId': record['messageId'], 'filepath': str(output)})
+        proc.wait_for(lambda: output.exists(), 20, what='offline original export')
+        assert output.read_bytes() == raw
+        def complete():
+            with proc.db() as db:
+                row = db.execute('SELECT data FROM Task WHERE id = ?', (task_id,)).fetchone()
+                return row and json.loads(row['data']).get('status') == 'complete'
+        proc.wait_for(complete, 10, what='local export completion')
+    finally:
+        if proc: proc.stop()
+        server.stop()
