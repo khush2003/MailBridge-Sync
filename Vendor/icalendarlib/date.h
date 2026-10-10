@@ -44,8 +44,8 @@ public:
     int toUnix() {
         struct tm timeinfo {};
         memset(&timeinfo, 0, sizeof(struct tm));
-        char Temp[16];
-        sprintf(Temp, "%.4d%.2d%.2dT%.2d%.2d%.2d", Data[YEAR], Data[MONTH], Data[DAY], Data[HOUR], Data[MINUTE], Data[SECOND]);
+        char Temp[64];
+        snprintf(Temp, sizeof(Temp), "%.4d%.2d%.2dT%.2d%.2d%.2d", Data[YEAR], Data[MONTH], Data[DAY], Data[HOUR], Data[MINUTE], Data[SECOND]);
         std::istringstream ss(Temp);
         ss >> std::get_time(&timeinfo, "%Y%m%dT%H%M%S");
         timeinfo.tm_isdst = -1; // let the C library work out DST for local times

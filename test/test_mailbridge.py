@@ -466,3 +466,41 @@ def test_two_pcs_keep_imap_mail_after_webmail_cleanup_without_cloud(tmp_path):
         if a: a.stop()
         if b: b.stop()
         server.stop()
+
+
+def test_bulk_delete_and_folder_delete_never_remove_server_mail(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        inbox_uid = server.append('INBOX', message(43002), flags=())
+        trash_uid = server.append('Trash', message(43003), flags=())
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path,
+                              binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_for(lambda: len(list((proc.config_dir / 'mailbridge' / 'records').glob('*.json'))) == 2,
+                      60, what='capture before bulk deletion')
+        proc.wait_quiescent(timeout=60)
+        for folder_name in ['INBOX', 'Trash']:
+            folder = proc.db_folders()[folder_name]
+            tasks = [
+                {'__cls': 'ExpungeAllInFolderTask', 'folder': {'id': folder['id'], 'path': folder_name}},
+                {'__cls': 'DestroyCategoryTask', 'path': folder_name},
+            ]
+            for task in tasks:
+                task_id = proc.queue_task(task)
+                def finished():
+                    with proc.db() as db:
+                        row = db.execute('SELECT data FROM Task WHERE id = ?', (task_id,)).fetchone()
+                        return row and json.loads(row['data']).get('status') == 'complete'
+                proc.wait_for(finished, 30, what='blocked server deletion')
+                with proc.db() as db:
+                    data = json.loads(db.execute('SELECT data FROM Task WHERE id = ?', (task_id,)).fetchone()['data'])
+                    assert data['error']['key'] == 'server-cleanup-disabled'
+                    assert not data['error']['retryable']
+        assert server.store.get('INBOX').by_uid(inbox_uid) is not None
+        assert server.store.get('Trash').by_uid(trash_uid) is not None
+        assert len(command(proc, 'list')['records']) == 2
+        assert proc.running
+    finally:
+        if proc: proc.stop()
+        server.stop()

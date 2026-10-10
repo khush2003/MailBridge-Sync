@@ -1,19 +1,25 @@
 #include "date.h"
 
 string Date::Format() const {
-	char Temp[16];
-	sprintf(Temp, "%.4d/%.2d/%.2d", Data[YEAR], Data[MONTH], Data[DAY]);
-	if (WithTime == true)
-		sprintf(Temp+10, " %.2d:%.2d", Data[HOUR], Data[MINUTE]);
-	return string(Temp);
+    char temp[64];
+    snprintf(temp, sizeof(temp), "%.4d/%.2d/%.2d", Data[YEAR], Data[MONTH], Data[DAY]);
+    string result(temp);
+    if (WithTime) {
+        snprintf(temp, sizeof(temp), " %.2d:%.2d", Data[HOUR], Data[MINUTE]);
+        result += temp;
+    }
+    return result;
 }
 
 Date::operator string() const {
-	char Temp[16];
-	sprintf(Temp, "%.4d%.2d%.2d", Data[YEAR], Data[MONTH], Data[DAY]);
-	if (WithTime == true)
-		sprintf(Temp+8, "T%.2d%.2d%.2d", Data[HOUR], Data[MINUTE], Data[SECOND]);
-	return string(Temp);
+    char temp[64];
+    snprintf(temp, sizeof(temp), "%.4d%.2d%.2d", Data[YEAR], Data[MONTH], Data[DAY]);
+    string result(temp);
+    if (WithTime) {
+        snprintf(temp, sizeof(temp), "T%.2d%.2d%.2d", Data[HOUR], Data[MINUTE], Data[SECOND]);
+        result += temp;
+    }
+    return result;
 }
 
 Date &Date::operator =(const string &Text) {

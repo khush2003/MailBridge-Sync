@@ -1,7 +1,7 @@
 #include "types.h"
 
 Recurrence::operator string() const {
-	char Temp[5];
+	char Temp[16];
 	string Text = "FREQ=";
 	switch (Freq) {
 		case YEAR: Text += "YEARLY"; break;
@@ -13,11 +13,11 @@ Recurrence::operator string() const {
 		case WEEK: Text += "WEEKLY"; break;
 	}
 	Text += ";INTERVAL=";
-	sprintf(Temp, "%d", Interval);
+	snprintf(Temp, sizeof(Temp), "%d", Interval);
 	Text += Temp;
 	if (Count > 0) {
 		Text += ";COUNT=";
-		sprintf(Temp, "%d", Count);
+		snprintf(Temp, sizeof(Temp), "%d", Count);
 		Text += Temp;
 	} else if (!Until.IsEmpty()) {
 		Text += ";UNTIL=";
@@ -28,33 +28,33 @@ Recurrence::operator string() const {
 }
 
 AlarmTrigger &AlarmTrigger::operator =(const string &Text) {
-	char UnitChar;
-	// 1 because always at least 'P' before the value
-	short i = 1;
-	
-	if (Text[0] == '-')
-		Before = true;
-	
-	while (!isdigit(Text[i]))
-		++i;
-	
-	sscanf(Text.c_str()+i, "%hd%c", (short *)&Value, &UnitChar);
-	
-	switch (UnitChar) {
-		case 'H': Unit = HOUR; break;
-		case 'D': Unit = DAY; break;
-		case 'W': Unit = WEEK; break;
-		default: Unit = MINUTE; break;
-	}
-	
-	return *this;
+    Before = !Text.empty() && Text.front() == '-';
+    Value = 0;
+    Unit = MINUTE;
+    const size_t prefix = Before ? 1 : 0;
+    if (Text.size() <= prefix || Text[prefix] != 'P') return *this;
+    const auto start = Text.find_first_of("0123456789", prefix + 1);
+    if (start == string::npos) return *this;
+    const auto end = Text.find_first_not_of("0123456789", start);
+    if (end == string::npos || end - start > 5) return *this;
+    const unsigned long value = std::stoul(Text.substr(start, end - start));
+    if (value > 65535) return *this;
+    switch (Text[end]) {
+        case 'H': Unit = HOUR; break;
+        case 'D': Unit = DAY; break;
+        case 'W': Unit = WEEK; break;
+        case 'M': Unit = MINUTE; break;
+        default: return *this;
+    }
+    Value = static_cast<unsigned short>(value);
+    return *this;
 }
 
 AlarmTrigger::operator string() const {
 	string Text;
-	char Temp[6];
+	char Temp[16];
 	
-	sprintf(Temp, "%d", Value);
+	snprintf(Temp, sizeof(Temp), "%d", Value);
 	
 	if (Before)
 		Text = '-';

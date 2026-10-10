@@ -815,6 +815,11 @@ void TaskProcessor::performLocal(Task * task) {
         if (task->accountId() != account->id()) {
             throw SyncException("generic", "You must provide an account id.", false);
         }
+        if (MailProcessor::retainedArchiveEnabled() &&
+            (cname == "ExpungeAllInFolderTask" || cname == "DestroyCategoryTask")) {
+            throw SyncException("server-cleanup-disabled",
+                "Server deletion is disabled while local retention is enabled. Clear company mailbox storage in webmail after both PCs finish downloading.", false);
+        }
 
         if (cname == "ChangeUnreadTask") {
             performLocalChangeOnMessages(task, _applyUnread);
@@ -938,6 +943,11 @@ void TaskProcessor::performRemote(Task * task) {
     try {
         if (task->accountId() != account->id()) {
             throw SyncException("generic", "You must provide an account id.", false);
+        }
+        if (MailProcessor::retainedArchiveEnabled() &&
+            (cname == "ExpungeAllInFolderTask" || cname == "DestroyCategoryTask")) {
+            throw SyncException("server-cleanup-disabled",
+                "Server deletion is disabled while local retention is enabled. Clear company mailbox storage in webmail after both PCs finish downloading.", false);
         }
         if (task->shouldCancel()) {
             task->setStatus("cancelled");
