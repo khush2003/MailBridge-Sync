@@ -507,3 +507,31 @@ def test_bulk_delete_and_folder_delete_never_remove_server_mail(tmp_path):
     finally:
         if proc: proc.stop()
         server.stop()
+
+
+def test_reimport_existing_mail_while_new_mail_is_captured(tmp_path):
+    server = FakeServer().start()
+    proc = None
+    try:
+        server.append('INBOX', message(41900, attachment=('original.bin', b'original payload')))
+        proc = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path, binary=BIN,
+                               env={'MAILBRIDGE_ARCHIVE': '1'})
+        proc.start()
+        proc.wait_quiescent(timeout=60)
+        record = command(proc, 'list')['records'][0]
+        for index in range(12):
+            server.append('INBOX', message(41901 + index,
+                          attachment=(f'incoming-{index}.bin', b'x' * (256 * 1024))))
+        proc.wake()
+        for _ in range(24):
+            imported = command(proc, 'import', descriptor=record)
+            assert imported['messageId'] == record['messageId']
+        proc.wait_for(lambda: command(proc, 'stats')['retained'] == 13, 60,
+                      what='mail capture during repeated imports')
+        records = command(proc, 'list')['records']
+        assert len(records) == 13
+        assert sum(item['key'] == record['key'] for item in records) == 1
+    finally:
+        if proc:
+            proc.stop()
+        server.stop()

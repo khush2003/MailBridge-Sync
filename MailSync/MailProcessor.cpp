@@ -1067,6 +1067,9 @@ shared_ptr<Message> MailProcessor::importRetainedMessage(Data * raw, const json 
     existing.bind(1, account->id()); existing.bind(2, key);
     if (existing.executeStep()) {
         auto message = make_shared<Message>(existing);
+        // Release the read snapshot before starting a write transaction. A concurrent
+        // sync commit otherwise makes the upgrade fail with SQLITE_BUSY_SNAPSHOT.
+        existing.reset();
         // Preserve current local state when receiving another transport copy of the same mail.
         retainMessage(message.get(), raw, *folder);
         return store->find<Message>(Query().equal("id", message->id()));
@@ -1117,6 +1120,7 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
                 SQLite::Statement query(store->db(), "SELECT Message.* FROM Message WHERE accountId = ? AND json_extract(data, '$.mailbridgeKey') = ? LIMIT 1");
                 query.bind(1, account->id()); query.bind(2, d.at("key").get<string>());
                 if (!query.executeStep()) {
+                    query.reset();
                     string bytes = readRetained(retainedRoot() / "blobs" / (d.at("digest").get<string>() + ".eml"));
                     auto snapshotPath = retainedRoot() / "state" / (d.at("key").get<string>() + ".json");
                     bool hadState = std::filesystem::exists(snapshotPath);
