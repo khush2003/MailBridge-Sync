@@ -336,30 +336,33 @@ class MailsyncProcess:
             time.sleep(0.1)
 
     def _drain_log(self):
-        if not self.log_path.exists():
-            return
         with self._log_lock:   # the tailer thread and waiters both drain
-            # spdlog rotates at 5 MB (mailsync-<id>.log -> mailsync-<id>.1.log). --verbose
-            # logs every IMAP line, so a large mailbox rotates several times per run.
-            if self.log_path.stat().st_size < self._log_pos:
-                rotated = self.log_path.with_name(self.log_path.name + ".1")
-                if rotated.exists():
-                    with open(rotated, "rb") as f:
-                        f.seek(self._log_pos)
-                        tail = f.read()
-                    cut = tail.rfind(b"\n")
-                    if cut >= 0:
-                        self._ingest_log(tail[:cut])
-                self._log_pos = 0
-            with open(self.log_path, "rb") as f:
-                f.seek(self._log_pos)
-                chunk = f.read()
-            # only consume complete lines; a line the engine is still writing waits for next time
-            cut = chunk.rfind(b"\n")
-            if cut < 0:
+            try:
+                # spdlog rotates at 5 MB (mailsync-<id>.log -> mailsync-<id>.1.log). --verbose
+                # logs every IMAP line, so a large mailbox rotates several times per run.
+                if self.log_path.stat().st_size < self._log_pos:
+                    rotated = self.log_path.with_name(self.log_path.name + ".1")
+                    if rotated.exists():
+                        with open(rotated, "rb") as f:
+                            f.seek(self._log_pos)
+                            tail = f.read()
+                        cut = tail.rfind(b"\n")
+                        if cut >= 0:
+                            self._ingest_log(tail[:cut])
+                    self._log_pos = 0
+                with open(self.log_path, "rb") as f:
+                    f.seek(self._log_pos)
+                    chunk = f.read()
+                # only consume complete lines; a line the engine is still writing waits for next time
+                cut = chunk.rfind(b"\n")
+                if cut < 0:
+                    return
+                self._log_pos += cut + 1
+                self._ingest_log(chunk[:cut])
+            except FileNotFoundError:
+                # The rotating logger briefly removes/replaces either pathname.
+                # Keep accumulated lines and retry on the next poll.
                 return
-            self._log_pos += cut + 1
-            self._ingest_log(chunk[:cut])
 
     def _ingest_log(self, chunk: bytes):
         t = self.elapsed()
