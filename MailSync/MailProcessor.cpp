@@ -1106,10 +1106,10 @@ void MailProcessor::setRetainedMailboxReady(bool ready) { retainedMailboxReady.s
 json MailProcessor::retainedArchiveCommand(const json & packet) {
     if (!retainedArchiveEnabled()) throw std::runtime_error("Retention is disabled");
     string operation = packet.at("operation").get<string>();
-    if (operation == "list") {
+    if (operation == "list" || operation == "stats") {
         json records = json::array();
         auto root = retainedRoot() / "records";
-        if (std::filesystem::exists(root)) {
+        if (operation == "list" && std::filesystem::exists(root)) {
             for (auto & entry : std::filesystem::directory_iterator(root)) {
                 if (entry.path().extension() != ".json") continue;
                 json d = json::parse(readRetained(entry.path()));
@@ -1164,7 +1164,9 @@ json MailProcessor::retainedArchiveCommand(const json & packet) {
         for (auto & folder : store->findAll<Folder>(Query().equal("accountId", account->id()))) {
             if (!folder->_data.value("mailbridgeLocal", false) && folder->localStatus().is_object() && folder->localStatus().value(LS_BUSY, false)) syncing = true;
         }
-        return {{"records", records}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}, {"mailSyncInitialized", retainedMailboxReady.load()}};
+        SQLite::Statement retained(store->db(), "SELECT COUNT(DISTINCT json_extract(data, '$.mailbridgeKey')) FROM Message WHERE accountId = ? AND json_extract(data, '$.mailbridgeKey') IS NOT NULL");
+        retained.bind(1, account->id()); retained.executeStep();
+        return {{"records", records}, {"retained", retained.getColumn(0).getInt()}, {"unretained", pending.getColumn(0).getInt()}, {"mailSyncBusy", syncing}, {"mailSyncInitialized", retainedMailboxReady.load()}};
     }
     if (operation == "import-file") {
         string filename = packet.at("file").get<string>();

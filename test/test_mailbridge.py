@@ -37,6 +37,9 @@ def test_old_mail_and_attachments_survive_expunge_and_import(tmp_path):
         a.wait_for(lambda: len(retained()) == 1, 60, what='full old-message capture')
         records = command(a, 'list')['records']
         assert len(records) == 1
+        stats = command(a, 'stats')
+        assert stats['retained'] == 1 and stats['unretained'] == 0
+        assert stats['records'] == [], 'status polling must not serialize the complete archive'
         record = records[0]
         assert record['digest'] == hashlib.sha256(raw).hexdigest()
         assert record['unread'] is True
