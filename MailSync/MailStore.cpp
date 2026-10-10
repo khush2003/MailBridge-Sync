@@ -881,6 +881,9 @@ void MailStore::refreshMessageFromPlacements(Message & msg) {
     set<string> labels;
     bool unread = false, starred = false, draft = false;
     for (auto & p : rows) {
+        // Keep server rows for IMAP synchronization, but a locally deleted
+        // archived message is shown only in this PC's retained Trash/Junk.
+        if (msg._data.value("mailbridgeHidden", false) && p.remoteUID > 0) continue;
         unread = unread || p.unread;
         starred = starred || p.starred;
         draft = draft || p.draft;

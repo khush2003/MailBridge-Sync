@@ -176,6 +176,13 @@ def test_local_delete_does_not_publish_deletion_and_survives_cache_reset(tmp_pat
                 row = db.execute('SELECT data FROM Message WHERE id = ?', (record['messageId'],)).fetchone()
                 return row and json.loads(row['data']).get('mailbridgeHidden')
         proc.wait_for(hidden, 30, what='local deletion')
+        proc.wait_quiescent(timeout=60)
+        assert server.store.get('INBOX').by_uid(uid) is not None, 'local Delete must leave the server copy for the other PC'
+        assert not server.store.get('Trash').messages, 'local Delete must not upload a Trash move'
+        with proc.db() as db:
+            data = json.loads(db.execute('SELECT data FROM Message WHERE id = ?', (record['messageId'],)).fetchone()['data'])
+            folders = [db.execute('SELECT path FROM Folder WHERE id = ?', (folder_id,)).fetchone()['path'] for folder_id in data['folders']]
+            assert folders == ['Retained/Trash'], 'the deleted message must leave this PC inbox even while IMAP retains its copy'
         assert command(proc, 'list')['records'][0]['folder'] == 'INBOX'
         command(proc, 'import', descriptor=record, state={'unread': False, 'starred': True, 'folder': 'INBOX'})
         assert hidden(), 'peer state must not restore locally deleted mail'
@@ -409,4 +416,53 @@ def test_retained_original_exports_without_server_or_network(tmp_path):
         proc.wait_for(complete, 10, what='local export completion')
     finally:
         if proc: proc.stop()
+        server.stop()
+
+
+def test_two_pcs_keep_imap_mail_after_webmail_cleanup_without_cloud(tmp_path):
+    server = FakeServer().start()
+    a = b = None
+    try:
+        raw = message(43001, attachment=('invoice.bin', b'complete invoice'))
+        uid = server.append('INBOX', raw, flags=())
+        a = MailsyncProcess(account_json(**server.account_kwargs()), tmp_path / 'a', binary=BIN,
+                            env={'MAILBRIDGE_ARCHIVE': '1'})
+        b = MailsyncProcess(account_json(**server.account_kwargs(), account_id='c0ffee-peer'),
+                            tmp_path / 'b', binary=BIN, env={'MAILBRIDGE_ARCHIVE': '1'})
+        for proc in (a, b):
+            proc.start()
+            proc.wait_for(lambda: list((proc.config_dir / 'mailbridge' / 'records').glob('*.json')),
+                          60, what='independent IMAP download')
+            proc.wait_quiescent(timeout=60)
+        ar = command(a, 'list')['records'][0]
+        br = command(b, 'list')['records'][0]
+        assert ar['key'] == br['key']
+        trash = a.db_folders()['Trash']
+        a.queue_task({'__cls': 'ChangeFolderTask', 'messageIds': [ar['messageId']],
+                      'folder': {'id': trash['id'], 'path': 'Trash', 'role': 'trash'}})
+        def a_hidden():
+            with a.db() as db:
+                return json.loads(db.execute('SELECT data FROM Message WHERE id = ?',
+                                             (ar['messageId'],)).fetchone()['data']).get('mailbridgeHidden')
+        a.wait_for(a_hidden, 30, what='private deletion on PC A')
+        a.wait_quiescent(timeout=60)
+        assert server.store.get('INBOX').by_uid(uid) is not None
+        b.wake(); b.wait_quiescent(timeout=60)
+        with b.db() as db:
+            data = json.loads(db.execute('SELECT data FROM Message WHERE id = ?',
+                                         (br['messageId'],)).fetchone()['data'])
+            assert not data.get('mailbridgeHidden')
+        server.expunge('INBOX', [uid])
+        for proc in (a, b):
+            proc.wake(); proc.wait_quiescent(timeout=60)
+            record = command(proc, 'list')['records'][0]
+            assert (proc.config_dir / 'mailbridge' / 'blobs' / f"{record['digest']}.eml").read_bytes() == raw
+        assert a_hidden()
+        with b.db() as db:
+            data = json.loads(db.execute('SELECT data FROM Message WHERE id = ?',
+                                         (br['messageId'],)).fetchone()['data'])
+            assert not data.get('mailbridgeHidden')
+    finally:
+        if a: a.stop()
+        if b: b.stop()
         server.stop()

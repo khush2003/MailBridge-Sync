@@ -1255,6 +1255,7 @@ void MailProcessor::hideRetainedPlacement(Message & message, const string & orig
     message._data["mailbridgeRole"] = logicalRole;
     message._data["mailbridgeHidden"] = true;
     message._data["mailbridgeHiddenFolder"] = origin;
+    store->refreshMessageFromPlacements(message);
 }
 
 void MailProcessor::writeRetainedState(Message & message) {

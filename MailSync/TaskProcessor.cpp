@@ -539,6 +539,10 @@ static vector<PlacementMove> _movesForMessage(MailStore * store, Message * msg, 
     if (data["folder"].value("mailbridgeLocal", false)) return moves;
     string dest = data["folder"]["id"].get<string>();
     string destRole = data["folder"].count("role") && data["folder"]["role"].is_string() ? data["folder"]["role"].get<string>() : "";
+    // A retained message's Delete/Junk action is private to this device. Keep the
+    // physical IMAP placement so another PC can still download the server copy.
+    if (MailProcessor::retainedArchiveEnabled() && !msg->isDraft() &&
+        (destRole == "trash" || destRole == "spam")) return moves;
     bool everyCopy = destRole == "trash" || destRole == "spam";
     set<string> sources;
     if (data.count("sourceFolderIds") && data["sourceFolderIds"].is_array()) {
@@ -584,6 +588,11 @@ static vector<PlacementMove> _movesForMessage(MailStore * store, Message * msg, 
 void _applyFolder(MailStore * store, Message * msg, const vector<Placement> & placements, json & data) {
     json shownIn = json::array();
     json retainedRestore;
+    string destinationRole = data["folder"].value("mailbridgeRole", data["folder"].value("role", ""));
+    if (MailProcessor::retainedArchiveEnabled() && !msg->isDraft() &&
+        (destinationRole == "trash" || destinationRole == "spam") && !msg->_data.contains("mailbridgeKey")) {
+        throw SyncException("mail-retention-incomplete", "Wait until this message has finished downloading before deleting it locally.", false);
+    }
     if (MailProcessor::retainedArchiveEnabled()) {
         for (auto & p : placements) {
             auto folder = p.remoteUID == 0 ? store->folderById(msg->accountId(), p.folderId) : nullptr;
